@@ -1,0 +1,5 @@
+.metaflow/
+mlruns/
+__pycache__/
+checks/
+*.parquet

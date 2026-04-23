@@ -1,0 +1,4 @@
+column,check,bad_frac
+duration_min,duration_negative,0.0003366625519021434
+duration_min,duration_over_6h,0.0031141286050948265
+duration_min,duration_nan,0.0
