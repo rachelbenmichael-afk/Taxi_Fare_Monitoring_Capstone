@@ -1,0 +1,15 @@
+{
+    "name": "Capstone Project Linux Lab",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python"
+            ]
+        }
+    },
+    "postCreateCommand": "pip install metaflow mlflow pandas pyarrow scikit-learn nannyml xgboost optuna torch"
+}

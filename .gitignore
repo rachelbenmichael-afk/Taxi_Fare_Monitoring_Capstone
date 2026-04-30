@@ -1,5 +1,17 @@
+# Existing project-specific ignores
 .metaflow/
 mlruns/
 __pycache__/
 checks/
 *.parquet
+
+# Python/Environment extras
+.ipynb_checkpoints/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+.vscode/
+mlartifacts/
