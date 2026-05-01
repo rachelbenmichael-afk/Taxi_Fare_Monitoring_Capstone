@@ -23,12 +23,10 @@ except ImportError:
     print("Error: Could not find green_taxi_drift_lib.py!")
 
 def init_mlflow(name):
-   # mlflow.set_tracking_uri("http://localhost:5000") i have skipped on this as we are using mlflow in local mode and it will create a mlruns directory in the current working directory to store the runs and artifacts.
-   # mlflow.set_experiment(name)
-   # We stay in local mode (no set_tracking_uri needed)
-   # This creates a solid path to the 'mlruns' folder in your project
-    tracking_path = "file://" + os.path.join(os.getcwd(), "mlruns")
-    mlflow.set_tracking_uri(tracking_path)
+    # This tells Metaflow to send all the metrics to the UI on port 5000
+    mlflow.set_tracking_uri("http://127.0.0.1:5000") 
+    
+    # This ensures your runs are grouped under the correct project name
     mlflow.set_experiment(name)
 
 def process_features(df):
@@ -63,27 +61,23 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step
     def integrity_gate(self):
+
         print("Checking data integrity...")
-        
-        # 1. Capture the single object returned by the library
         self.chk = run_integrity_checks(self.batch)
+                               
+        # We initialize MLflow for this specific step
+        init_mlflow(self.model_name)
         
-        # 2. Your original logic to save every individual table
-        os.makedirs("checks", exist_ok=True)
-        for name, tbl in self.chk.tables.items():
-            temp_path = f"checks/{name}.csv"
-            tbl.to_csv(temp_path, index=False)
-            print(f"Verified and Saved: {temp_path}")
-        
-        '''# init_mlflow(self.model_name)
-        # with mlflow.start_run(run_name="Data_Integrity"):
-        #     os.makedirs("checks", exist_ok=True)
-        #     for name, tbl in chk.tables.items():
-        #         temp_path = f"checks/{name}.csv"
-        #         tbl.to_csv(temp_path, index=False)
-        #         mlflow.log_artifact(temp_path, artifact_path="integrity_reports")'''
+        with mlflow.start_run(run_name="Data_Integrity"):
+            os.makedirs("checks", exist_ok=True)
+            for name, tbl in self.chk.tables.items():
+                temp_path = f"checks/{name}.csv"
+                tbl.to_csv(temp_path, index=False)
+                
+                # Log to the MLflow UI
+                mlflow.log_artifact(temp_path, artifact_path="integrity_reports")
+                print(f"Verified, Saved, and Logged: {temp_path}")
             
-        # 3. Use the exist_ok variable to decide where to go next
         self.next(self.load_champion)
     
     @step
@@ -144,6 +138,12 @@ class MLFlowCapstoneFlow(FlowSpec):
         
         print(f"Optimization complete! Best RMSE: {self.rmse:.4f}")
         print(f"Best Parameters: {self.best_params}")
+
+        
+        # Set the active experiment for this step to ensure metrics 
+        # and artifacts are logged to 'green_taxi_tip_model' instead of 'Default'.
+        init_mlflow(self.model_name)
+
 
         # Log the final 'Tuned' model to MLflow
         # CORRECTION: Added 'as run' and moved promotion logic INSIDE this block
