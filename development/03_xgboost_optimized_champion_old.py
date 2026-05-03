@@ -160,62 +160,71 @@ class TaxiMonitoringFlow(FlowSpec):
         self.next(self.model_gate) # CHANGED: Go to the gate first
 
     @step
-    @step
     def model_gate(self):
         """
         Step E: Performance Gate using NannyML
         Estimates the champion's performance on the new batch.
         """
+        # ADD THIS LINE HERE
         init_mlflow(self.model_name)
-        client = MlflowClient()
         
-        # Default to False; the logic below will decide if we flip it to True
-        self.retrain_needed = False 
+        print("Evaluating Champion performance on new batch...")
+        
+        # 1. Prepare data for NannyML
+        features = ['hour', 'day_of_week', 'log_trip_distance', 'trip_duration', 'avg_speed', 'pickup_zip', 'dropoff_zip']
+        target = 'tip_amount'
+        
+        # NannyML needs a reference period (April) to 'learn' the error patterns
+        # and an analysis period (August) to estimate the current error.
+        
+        # 2. Initialize NannyML DLE (Direct Loss Estimator)
+        estimator = nml.DLE(
+            feature_column_names=features,
+            y_pred='prediction', # We'll need to add predictions to our dataframes
+            y_true=target,
+            metrics=['rmse'],
+            chunk_size=5000 
+        )
+        
+        # We must add the champion's predictions to both dataframes
+        # This simulates running the champion model on the data
+        from mlflow.sklearn import load_model
+        client = MlflowClient()
+        champ_version = client.get_model_version_by_alias(self.model_name, "champion")
+        model = load_model(f"models:/{self.model_name}@champion")
+        
+        self.ref['prediction'] = model.predict(self.ref[features])
+        self.batch['prediction'] = model.predict(self.batch[features])
+        
+        # 3. Fit on reference (April) and estimate on analysis (August)
+        estimator.fit(self.ref)
+        results = estimator.estimate(self.batch)
+        
+        # Get the estimated RMSE value
+        self.estimated_rmse = results.to_df().iloc[-1][('rmse', 'value')]
+        print(f"Champion Baseline RMSE: {self.champion_rmse:.4f}")
+        print(f"Estimated RMSE on New Batch: {self.estimated_rmse:.4f}")
+        
+        # 4. Decision Logic: Retrain if estimated RMSE is > 5% worse than baseline
+        drift_threshold = 1.05 
+        self.retrain_needed = self.estimated_rmse > (self.champion_rmse * drift_threshold)
+        
+        if self.retrain_needed:
+            print("ALERT: Performance degradation detected. Triggering retraining.")
+        else:
+            print("Performance is stable. No retraining needed today.")
 
-        try:
-            # 1. Try to find if a champion exists for this model name
-            champ_version = client.get_model_version_by_alias(self.model_name, "champion")
-            print(f"Champion found (Version {champ_version.version}). Proceeding with NannyML evaluation...")
-            
-            # 2. Load the model for the NannyML estimation
-            from mlflow.sklearn import load_model
-            model = load_model(f"models:/{self.model_name}@champion")
-            
-            # 3. Prepare features and target
-            features = ['hour', 'day_of_week', 'log_trip_distance', 'trip_duration', 'avg_speed', 'pickup_zip', 'dropoff_zip']
-            target = 'tip_amount'
-            
-            # 4. Generate predictions for the DLE estimator
-            self.ref['prediction'] = model.predict(self.ref[features])
-            self.batch['prediction'] = model.predict(self.batch[features])
-            
-            # 5. Initialize and fit NannyML DLE
-            estimator = nml.DLE(
-                feature_column_names=features,
-                y_pred='prediction',
-                y_true=target,
-                metrics=['rmse'],
-                chunk_size=5000 
-            )
-            estimator.fit(self.ref)
-            results = estimator.estimate(self.batch)
-            
-            # 6. Compare performance against the baseline
-            self.estimated_rmse = results.to_df().iloc[-1][('rmse', 'value')]
-            print(f"Champion Baseline RMSE: {self.champion_rmse:.4f}")
-            print(f"Estimated RMSE on New Batch: {self.estimated_rmse:.4f}")
-            
-            drift_threshold = 1.05 
-            self.retrain_needed = self.estimated_rmse > (self.champion_rmse * drift_threshold)
+        # Step F: Conditional transition
+        #self.next(self.train_model if self.retrain_needed else self.end)
+        # Determine the route based on the NannyML result
+        if self.retrain_needed:
+            self.route = "retrain"
+        else:
+            self.route = "skip"
 
-        except Exception as e:
-            # This catches the RESOURCE_DOES_NOT_EXIST error and forces a training run
-            print(f"No valid champion found for {self.model_name}. Forcing retrain to establish first champion. (Error: {e})")
-            self.retrain_needed = True
-            self.estimated_rmse = 0.0 
-
-        # 7. Route to the next step
-        self.route = "retrain" if self.retrain_needed else "skip"
+        # This dictionary tells Metaflow: 
+        # "If self.route is 'retrain', go to self.train_model. 
+        #  If it's 'skip', go to self.end."
         self.next(
             {"retrain": self.train_model, "skip": self.end}, 
             condition="route"
