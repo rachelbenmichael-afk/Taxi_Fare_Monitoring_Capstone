@@ -9,9 +9,13 @@ from metaflow import FlowSpec, Parameter, step
 
 # --- 1. DEFINE INIT_MLFLOW DIRECTLY HERE ---
 def init_mlflow(name):
-    # This ensures we talk to the server at http://127.0.0.1:5000
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
-    mlflow.set_tracking_uri(tracking_uri)
+    # This tells Metaflow to send all the metrics to the UI on port 5000 (old)
+    #mlflow.set_tracking_uri("http://127.0.0.1:5000")
+    
+    # This anchors all your scripts to the same physical location
+    abs_tracking_uri = "file:///workspaces/Taxi_Fare_Monitoring_Capstone/mlruns"
+    mlflow.set_tracking_uri(abs_tracking_uri)
+
     mlflow.set_experiment(name)
 
 # --- 2. THE IMPORT HACK FOR YOUR FEATURES ---
@@ -27,7 +31,7 @@ except ImportError as e:
 # --- 3. START THE CLASS ---
 
 class TaxiMonitoringFlow(FlowSpec):
-    model_name = Parameter("model-name", default="green_taxi_tip_model_v2")
+    model_name = Parameter("model-name", default="green_taxi_tip_model")
     reference_path = Parameter("reference-path", help="Jan data")
     batch_path = Parameter("batch-path", help="Current data batch")
 
@@ -44,20 +48,35 @@ class TaxiMonitoringFlow(FlowSpec):
         self.batch = process_features(self.batch)
         self.next(self.run_monitoring)
 
+    
     @step
     def run_monitoring(self):
-        client = MlflowClient()
-        # 1. Load the Champion model to get predictions
-        champion_ver = client.get_model_version_by_alias(self.model_name, "champion")
-        model = mlflow.sklearn.load_model(f"models:/{self.model_name}@champion")
+        # 1. FIX: Use the SAME physical path as your other scripts
+        abs_tracking_uri = "file:///workspaces/Taxi_Fare_Monitoring_Capstone/mlruns"
+        os.environ["MLFLOW_TRACKING_URI"] = abs_tracking_uri
+        mlflow.set_tracking_uri(abs_tracking_uri)
         
+        client = MlflowClient()
+        
+        # 2. Load the Champion model 
+        try:
+            # We use the tracking_uri we just set above
+            champion_ver = client.get_model_version_by_alias(self.model_name, "champion")
+            model_uri = f"models:/{self.model_name}@champion"
+            model = mlflow.sklearn.load_model(model_uri)
+            print(f"Successfully loaded champion version {champion_ver.version}")
+        except Exception as e:
+            print(f"Failed to find model '{self.model_name}' with alias '@champion'")
+            raise e
+        
+        # Define features used in training
         features = ['hour', 'day_of_week', 'log_trip_distance', 'trip_duration', 'avg_speed', 'pickup_zip', 'dropoff_zip']
         
-        # 2. Generate predictions needed for drift analysis
+        # 3. Generate predictions needed for drift analysis
         self.ref['prediction'] = model.predict(self.ref[features])
         self.batch['prediction'] = model.predict(self.batch[features])
 
-        # 3. Start an MLflow Run specifically for Monitoring
+        # 4. Start an MLflow Run specifically for Monitoring
         with mlflow.start_run(run_name="Monitoring_Deep_Dive"):
             os.makedirs("monitoring_plots", exist_ok=True)
             
@@ -94,7 +113,6 @@ class TaxiMonitoringFlow(FlowSpec):
             print("Monitoring artifacts successfully uploaded to MLflow.")
 
         self.next(self.end)
-
     @step
     def end(self):
         print("Monitoring Flow Complete.")

@@ -27,9 +27,13 @@ except ImportError:
 
 # 3. Helper Functions
 
-def init_mlflow(name):
-   # This tells Metaflow to send all the metrics to the UI on port 5000
-    mlflow.set_tracking_uri("http://127.0.0.1:5000") 
+def  init_mlflow(name):
+    # This tells Metaflow to send all the metrics to the UI on port 5000 (old)
+    #mlflow.set_tracking_uri("http://127.0.0.1:5000")
+    
+    # This anchors all your scripts to the same physical location
+    abs_tracking_uri = "file:///workspaces/Taxi_Fare_Monitoring_Capstone/mlruns"
+    mlflow.set_tracking_uri(abs_tracking_uri)
     
     # This ensures your runs are grouped under the correct project name
     mlflow.set_experiment(name)
@@ -74,6 +78,7 @@ class TaxiMonitoringFlow(FlowSpec):
         "model-name", 
         default="green_taxi_tip_model"
     )
+    
 
 
     @step
@@ -159,7 +164,6 @@ class TaxiMonitoringFlow(FlowSpec):
 
         self.next(self.model_gate) # CHANGED: Go to the gate first
 
-    @step
     @step
     def model_gate(self):
         """
