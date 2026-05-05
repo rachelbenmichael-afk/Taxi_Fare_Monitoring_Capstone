@@ -7,40 +7,36 @@ import nannyml as nml
 from mlflow.tracking import MlflowClient
 from metaflow import FlowSpec, Parameter, step
 
-# --- Project Library Integration ---
+# --- 1. DEFINE INIT_MLFLOW DIRECTLY HERE ---
 def init_mlflow(name):
-    """
-    Anchors monitoring results to the central MLflow repository.
-    Ensures that drift reports and performance estimations are grouped with the main experiment.
-    """
+    # This tells Metaflow to send all the metrics to the UI on port 5000 (old)
+    #mlflow.set_tracking_uri("http://127.0.0.1:5000")
+    
+    # This anchors all your scripts to the same physical location
     abs_tracking_uri = "file:///workspaces/Taxi_Fare_Monitoring_Capstone/mlruns"
     mlflow.set_tracking_uri(abs_tracking_uri)
+
     mlflow.set_experiment(name)
 
-# --- Feature Engineering Import ---
+# --- 2. THE IMPORT HACK FOR YOUR FEATURES ---
 import importlib
 sys.path.append(os.getcwd())
 try:
-    # Dynamically import the feature logic from the champion script to ensure consistency
     training_module = importlib.import_module("03_xgboost_optimized_champion")
     process_features = training_module.process_features
     print("Successfully imported process_features logic!")
 except ImportError as e:
     print(f"Error: Could not find training file logic: {e}")
 
+# --- 3. START THE CLASS ---
+
 class TaxiMonitoringFlow(FlowSpec):
-    """
-    Phase 3: Deep-Dive Monitoring & Reporting.
-    This flow generates detailed NannyML reports for Univariate Drift and Performance Estimation.
-    It is used to visualize data shifts between the January baseline and current production batches.
-    """
-    model_name = Parameter("model-name", default="green_taxi_tip_model_final")
-    reference_path = Parameter("reference-path", help="January baseline data")
-    batch_path = Parameter("batch-path", help="Current production data batch")
+    model_name = Parameter("model-name", default="green_taxi_tip_model")
+    reference_path = Parameter("reference-path", help="Jan data")
+    batch_path = Parameter("batch-path", help="Current data batch")
 
     @step
     def start(self):
-        """Initialize tracking and load raw data slices."""
         init_mlflow(self.model_name)
         self.ref = pd.read_parquet(self.reference_path)
         self.batch = pd.read_parquet(self.batch_path)
@@ -48,50 +44,43 @@ class TaxiMonitoringFlow(FlowSpec):
 
     @step
     def prepare_data(self):
-        """Design Doc Step C: Apply standardized feature engineering to ensure valid comparison."""
         self.ref = process_features(self.ref)
         self.batch = process_features(self.batch)
         self.next(self.run_monitoring)
+
     
     @step
     def run_monitoring(self):
-        """
-        Main Monitoring Step.
-        1. Loads the current Champion model.
-        2. Calculates Univariate Drift (KS Test).
-        3. Estimates RMSE using DLE.
-        4. Uploads interactive HTML reports as MLflow artifacts.
-        """
-        # Ensure tracking URI is set for this step's environment
+        # 1. FIX: Use the SAME physical path as your other scripts
         abs_tracking_uri = "file:///workspaces/Taxi_Fare_Monitoring_Capstone/mlruns"
         os.environ["MLFLOW_TRACKING_URI"] = abs_tracking_uri
         mlflow.set_tracking_uri(abs_tracking_uri)
         
         client = MlflowClient()
         
-        # Load the current Champion model from the Registry
+        # 2. Load the Champion model 
         try:
+            # We use the tracking_uri we just set above
             champion_ver = client.get_model_version_by_alias(self.model_name, "champion")
             model_uri = f"models:/{self.model_name}@champion"
             model = mlflow.sklearn.load_model(model_uri)
             print(f"Successfully loaded champion version {champion_ver.version}")
         except Exception as e:
-            print(f"Failed to find @champion for monitoring: {e}")
+            print(f"Failed to find model '{self.model_name}' with alias '@champion'")
             raise e
         
-        # Define the specific features to monitor for drift
+        # Define features used in training
         features = ['hour', 'day_of_week', 'log_trip_distance', 'trip_duration', 'avg_speed', 'pickup_zip', 'dropoff_zip']
         
-        # Generate predictions required for Drift and Estimation analysis
+        # 3. Generate predictions needed for drift analysis
         self.ref['prediction'] = model.predict(self.ref[features])
         self.batch['prediction'] = model.predict(self.batch[features])
 
-        # Execute detailed NannyML analysis
+        # 4. Start an MLflow Run specifically for Monitoring
         with mlflow.start_run(run_name="Monitoring_Deep_Dive"):
             os.makedirs("monitoring_plots", exist_ok=True)
             
-            # --- UNIVARIATE DRIFT ANALYSIS ---
-            # Compares distribution shapes between Reference and Analysis periods.
+            # --- UNIVARIATE DRIFT ---
             calc = nml.UnivariateDriftCalculator(
                 column_names=features,
                 continuous_methods=['kolmogorov_smirnov'],
@@ -100,12 +89,11 @@ class TaxiMonitoringFlow(FlowSpec):
             calc.fit(self.ref)
             results = calc.calculate(self.batch)
             
-            # Save Drift Report
+            # Save and Log Plot
             fig = results.filter(column_names=features).plot()
             fig.write_html("monitoring_plots/univariate_drift.html")
             
             # --- PERFORMANCE ESTIMATION (DLE) ---
-            # Estimates actual error (RMSE) on unlabeled production data.
             estimator = nml.DLE(
                 feature_column_names=features,
                 y_pred='prediction',
@@ -116,20 +104,18 @@ class TaxiMonitoringFlow(FlowSpec):
             estimator.fit(self.ref)
             est_results = estimator.estimate(self.batch)
             
-            # Save Performance Estimation Report
+            # Save and Log Plot
             fig_perf = est_results.plot()
             fig_perf.write_html("monitoring_plots/performance_estimation.html")
 
-            # Upload interactive reports to MLflow UI
+            # Upload the whole folder to MLflow
             mlflow.log_artifacts("monitoring_plots", artifact_path="drift_analysis")
-            print("Monitoring reports uploaded as artifacts.")
+            print("Monitoring artifacts successfully uploaded to MLflow.")
 
         self.next(self.end)
-
     @step
     def end(self):
-        """Finalize the deep-dive monitoring flow."""
-        print("Monitoring Flow Complete. Reports available in MLflow Artifacts.")
+        print("Monitoring Flow Complete.")
 
 if __name__ == "__main__":
     TaxiMonitoringFlow()

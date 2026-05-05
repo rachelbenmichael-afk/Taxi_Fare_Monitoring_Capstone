@@ -1,44 +1,39 @@
-# 1. Imports
 import os
 import sys
+import numpy as np
+import pandas as pd
 import xgboost as xgb
 import optuna
 import nannyml as nml
-
-# --- 2. INTEGRATION POINT (Continue with taxi_flow logic) ---
-sys.path.append(os.getcwd())
-
-
-from metaflow import FlowSpec, Parameter, step
-import pandas as pd
-import numpy as np
 import mlflow
-from sklearn.tree import DecisionTreeRegressor
+from mlflow.tracking import MlflowClient
+from metaflow import FlowSpec, Parameter, step
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_squared_error
-from mlflow.tracking import MlflowClient # Add this line
 
-# 2. Project Library Imports
+# --- Project Library Integration ---
+sys.path.append(os.getcwd())
 try:
     from green_taxi_drift_lib import load_taxi_table, run_integrity_checks
 except ImportError:
     print("Error: Could not find green_taxi_drift_lib.py!")
 
-# 3. Helper Functions
-
-def  init_mlflow(name):
-    # This tells Metaflow to send all the metrics to the UI on port 5000 (old)
-    #mlflow.set_tracking_uri("http://127.0.0.1:5000")
-    
-    # This anchors all your scripts to the same physical location
+def init_mlflow(name):
+    """
+    Initializes tracking for the champion promotion phase.
+    Ensures artifacts are saved to the local workspace for auditable decisions.
+    """
     abs_tracking_uri = "file:///workspaces/Taxi_Fare_Monitoring_Capstone/mlruns"
     mlflow.set_tracking_uri(abs_tracking_uri)
-    
-    # This ensures your runs are grouped under the correct project name
     mlflow.set_experiment(name)
 
 def process_features(df):
+    """
+    Design Doc Step C: Feature Engineering
+    Implements advanced features including duration, speed, and location embeddings.
+    Used consistently for training, evaluation, and monitoring.
+    """
     df = df.copy()
     
     # 1. Time Features
@@ -46,66 +41,59 @@ def process_features(df):
     df['day_of_week'] = df['lpep_pickup_datetime'].dt.dayofweek
     df['month'] = df['lpep_pickup_datetime'].dt.month
     
-    # 2. Advanced Mathematical Transforms
+    # 2. Mathematical Transforms
     df['log_trip_distance'] = np.log1p(df['trip_distance'].clip(lower=0, upper=100))
     
-    # 3. NEW: Trip Duration (in minutes)
+    # 3. Temporal Features (Duration in minutes)
     duration = (df['lpep_dropoff_datetime'] - df['lpep_pickup_datetime']).dt.total_seconds() / 60
-    df['trip_duration'] = duration.clip(lower=1, upper=120) # Clip to remove outliers/errors
+    df['trip_duration'] = duration.clip(lower=1, upper=120)
     
-    # 4. NEW: Average Speed (miles per minute)
+    # 4. Behavioral Features (Average Speed)
     df['avg_speed'] = df['trip_distance'] / (df['trip_duration'])
     
-    # 5. NEW: Location Features (Cast to int to ensure stability)
+    # 5. Spatial Features (Location IDs)
     df['pickup_zip'] = df['PULocationID'].astype(int)
     df['dropoff_zip'] = df['DOLocationID'].astype(int)
     
     return df
 
 class TaxiMonitoringFlow(FlowSpec):
-    # UPDATE: Changing the help text to match the Phase 2 scenario
-    reference_path = Parameter(
-        "reference-path", 
-        help="Path to April data (your stable baseline)",
-        default="green_tripdata_2020-04.parquet" # Optional: set a default
-    )
-    batch_path = Parameter(
-        "batch-path", 
-        help="Path to August data (the new batch to monitor)",
-        default="green_tripdata_2020-08.parquet" # Optional: set a default
-    )
-    model_name = Parameter(
-        "model-name", 
-        default="green_taxi_tip_model"
-    )
-    
-
+    """
+    Phase 2: Automated Retraining and Promotion Logic.
+    Integrates NannyML DLE to estimate performance and decide on retraining.
+    """
+    reference_path = Parameter("reference-path", help="April data (Stable Baseline)")
+    batch_path = Parameter("batch-path", help="August data (New Production Batch)")
+    model_name = Parameter("model-name", default="green_taxi_tip_model_final")
 
     @step
     def start(self):
+        """Initialize experiment and prepare for data ingestion."""
         init_mlflow(self.model_name)
         self.next(self.load_data)
 
-    # ... (Keep load_data, feature_engineering, integrity_gate)
     @step
     def load_data(self):
+        """Design Doc Step A: Load reference and current production batches."""
         self.ref = load_taxi_table(self.reference_path)
         self.batch = load_taxi_table(self.batch_path)
         self.next(self.feature_engineering)
 
     @step
     def feature_engineering(self):
+        """Design Doc Step C: Apply advanced feature engineering to both datasets."""
         self.ref = process_features(self.ref)
         self.batch = process_features(self.batch)
         self.next(self.integrity_gate)
     
     @step
     def integrity_gate(self):
-        print("Running Layer 1 (Hard Checks) & Layer 2 (NannyML Soft Checks)...")
-        
+        """
+        Design Doc Step B: Two-Layer Integrity Gate
+        Layer 1: Hard Rules (via lib)
+        Layer 2: NannyML Missingness Spike (Soft Gate)
+        """
         self.chk = run_integrity_checks(self.batch)
-        
-        # We initialize MLflow for this specific step
         init_mlflow(self.model_name)
         
         with mlflow.start_run(run_name="Data_Integrity"):
@@ -113,226 +101,143 @@ class TaxiMonitoringFlow(FlowSpec):
             for name, tbl in self.chk.tables.items():
                 temp_path = f"checks/{name}.csv"
                 tbl.to_csv(temp_path, index=False)
-                
-                # Log to the MLflow UI
                 mlflow.log_artifact(temp_path, artifact_path="integrity_reports")
-                print(f"Verified, Saved, and Logged: {temp_path}")
 
-        # 2. Layer 2: NannyML Missing Values Spike Check (Soft Gate)
-        # This compares April (ref) to August (batch)
+        # NannyML Soft Gate Check
         try:
             feature_cols = ['log_trip_distance', 'trip_duration', 'avg_speed']
             calc = nml.MissingValuesCalculator(column_names=feature_cols)
-            
-            # Fit on April, calculate on August
             calc.fit(self.ref)
             results = calc.calculate(self.batch)
-            
-            # Check for alerts in the latest data chunk
             alerts = results.filter(period='analysis').to_df().iloc[-1].filter(like='alert')
             if alerts.any():
-                print("⚠️  NannyML ALERT: Significant missingness spike detected in August data!")
-            else:
-                print("✅ NannyML: No missingness spikes detected.")
+                print("⚠️ NannyML ALERT: Missingness spike detected!")
         except Exception as e:
-            print(f"Could not run NannyML Layer 2 checks: {e}")
+            print(f"Soft gate check failed: {e}")
                          
-        # We always proceed to load_champion because Layer 1 didn't crash 
-        # and Layer 2 is a 'soft' warning gate.
         self.next(self.load_champion)
-    
 
     @step
     def load_champion(self):
-        # ADD THIS LINE HERE
+        """Design Doc Step D: Retrieve active champion for performance benchmarking."""
         init_mlflow(self.model_name)
         client = MlflowClient()
-
-
         try:
-            # Try to find the version marked as 'champion'
             champion_version = client.get_model_version_by_alias(self.model_name, "champion")
-            # Get the RMSE from that specific run
             run_data = client.get_run(champion_version.run_id).data
             self.champion_rmse = float(run_data.metrics['rmse'])
-            print(f"Found Champion! Version: {champion_version.version}, RMSE: {self.champion_rmse}")
-
-        except Exception as e:
-            # If no champion exists (Run 1), set a high number so the candidate wins
-            print("No champion found in registry. This is the first run.")
+            print(f"Champion Active: Version {champion_version.version}")
+        except Exception:
+            print("No champion found. Bootstrapping first model.")
             self.champion_rmse = 999.0 
 
-        self.next(self.model_gate) # CHANGED: Go to the gate first
+        self.next(self.model_gate)
 
     @step
     def model_gate(self):
         """
-        Step E: Performance Gate using NannyML
-        Estimates the champion's performance on the new batch.
+        Design Doc Step E: Performance Gate
+        Uses NannyML DLE to estimate Champion RMSE on the new batch without targets.
         """
         init_mlflow(self.model_name)
         client = MlflowClient()
-        
-        # Default to False; the logic below will decide if we flip it to True
         self.retrain_needed = False 
 
         try:
-            # 1. Try to find if a champion exists for this model name
             champ_version = client.get_model_version_by_alias(self.model_name, "champion")
-            print(f"Champion found (Version {champ_version.version}). Proceeding with NannyML evaluation...")
-            
-            # 2. Load the model for the NannyML estimation
             from mlflow.sklearn import load_model
             model = load_model(f"models:/{self.model_name}@champion")
             
-            # 3. Prepare features and target
             features = ['hour', 'day_of_week', 'log_trip_distance', 'trip_duration', 'avg_speed', 'pickup_zip', 'dropoff_zip']
-            target = 'tip_amount'
-            
-            # 4. Generate predictions for the DLE estimator
             self.ref['prediction'] = model.predict(self.ref[features])
             self.batch['prediction'] = model.predict(self.batch[features])
             
-            # 5. Initialize and fit NannyML DLE
+            # DLE Performance Estimation
             estimator = nml.DLE(
-                feature_column_names=features,
-                y_pred='prediction',
-                y_true=target,
-                metrics=['rmse'],
-                chunk_size=5000 
+                feature_column_names=features, y_pred='prediction', y_true='tip_amount',
+                metrics=['rmse'], chunk_size=5000 
             )
             estimator.fit(self.ref)
             results = estimator.estimate(self.batch)
             
-            # 6. Compare performance against the baseline
             self.estimated_rmse = results.to_df().iloc[-1][('rmse', 'value')]
-            print(f"Champion Baseline RMSE: {self.champion_rmse:.4f}")
-            print(f"Estimated RMSE on New Batch: {self.estimated_rmse:.4f}")
             
+            # Decision Rule: Retrain if estimated RMSE exceeds baseline by 5%
             drift_threshold = 1.05 
             self.retrain_needed = self.estimated_rmse > (self.champion_rmse * drift_threshold)
 
-        except Exception as e:
-            # This catches the RESOURCE_DOES_NOT_EXIST error and forces a training run
-            print(f"No valid champion found for {self.model_name}. Forcing retrain to establish first champion. (Error: {e})")
+        except Exception:
+            print("Forcing retrain to establish first champion.")
             self.retrain_needed = True
-            self.estimated_rmse = 0.0 
 
-        # 7. Route to the next step
         self.route = "retrain" if self.retrain_needed else "skip"
-        self.next(
-            {"retrain": self.train_model, "skip": self.end}, 
-            condition="route"
-        )
+        self.next({"retrain": self.train_model, "skip": self.end}, condition="route")
     
     def objective(self, trial, train_df, test_df, features, target):
-    # 1. Define the search space
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 50, 500),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
         }
-
-        # 2. Build and train the model with these trial parameters
         model = self.build_xgboost_model(**params)
         model.fit(train_df[features], train_df[target])
-
-        # 3. Calculate the score for this specific trial
         preds = model.predict(test_df[features])
-        rmse = np.sqrt(mean_squared_error(test_df[target], preds))
-        
-        return rmse
+        return np.sqrt(mean_squared_error(test_df[target], preds))
 
     @step
     def train_model(self):
         """
-        Step F: Retrain (Conditional)
-        Only runs if self.retrain_needed was True.
+        Design Doc Step F: Conditional Retraining
+        Trains a new XGBoost candidate if the Performance Gate detects degradation.
         """
-        # Update this list to include your new features!
-        features = [
-            'hour', 'day_of_week', 'log_trip_distance', 
-            'trip_duration', 'avg_speed', 'pickup_zip', 'dropoff_zip'
-        ]
+        features = ['hour', 'day_of_week', 'log_trip_distance', 'trip_duration', 'avg_speed', 'pickup_zip', 'dropoff_zip']
         target = 'tip_amount'
-        
         train_df = self.ref[self.ref['payment_type'] == 1]
         test_df = self.batch[self.batch['payment_type'] == 1]
 
-        # Initialize the Optuna study
         study = optuna.create_study(direction="minimize")
-        
-        # Run the optimization (20 iterations)
         study.optimize(lambda trial: self.objective(trial, train_df, test_df, features, target), n_trials=20)
 
-        # Get the best parameters and the best score
         self.best_params = study.best_params
         self.rmse = study.best_value
-        
-        print(f"Optimization complete! Best RMSE: {self.rmse:.4f}")
-        print(f"Best Parameters: {self.best_params}")
-        
-        # Set the active experiment for this step to ensure metrics 
-        # and artifacts are logged to 'green_taxi_tip_model' instead of 'Default'.
         init_mlflow(self.model_name)
 
-
-        # Log the final 'Tuned' model to MLflow
-        # CORRECTION: Added 'as run' and moved promotion logic INSIDE this block
         with mlflow.start_run(run_name="Tuned_XGBoost_Candidate_Plus_FE") as run:
             mlflow.log_params(self.best_params)
-            mlflow.log_param("model_type", "XGBoost_FE")
             mlflow.log_metric("rmse", self.rmse)
             
             final_model = self.build_xgboost_model(**self.best_params)
             final_model.fit(train_df[features], train_df[target])
             mlflow.sklearn.log_model(final_model, artifact_path="model")
-                     
-            print(f"Logging complete! RMSE {self.rmse:.4f} is now in MLflow.")
 
-            # --- PROMOTION LOGIC (Now safe inside the run) ---
+            # Design Doc Step G: Candidate Acceptance (Promotion)
             client = MlflowClient()
-            improvement_threshold = 0.01 
+            improvement_threshold = 0.00 
             
             if self.rmse < self.champion_rmse * (1 - improvement_threshold):
-                print(f"Candidate ({self.rmse:.4f}) beat Champion ({self.champion_rmse:.4f})!")
-                
-                # CORRECTION: Fixed run_id reference
-                result = mlflow.register_model(
-                    f"runs:/{run.info.run_id}/model", 
-                    self.model_name
-                )
-                
+                result = mlflow.register_model(f"runs:/{run.info.run_id}/model", self.model_name)
                 client.set_registered_model_alias(self.model_name, "champion", result.version)
-                print(f"Model version {result.version} is now the @champion.")
-            else:
-                print("Candidate did not improve enough. Champion remains the same.")
+                print(f"Version {result.version} promoted to @champion.")
 
         self.next(self.end)
 
     @step
     def end(self):
-        # Final status report
-        status = "RE-TRAINED & UPDATED" if getattr(self, 'retrain_needed', False) else "MONITORED - NO CHANGE"
-        print (f"Success! Flow status: {status}")
+        """Report flow completion status."""
+        status = "RE-TRAINED" if getattr(self, 'retrain_needed', False) else "MONITORED"
+        print (f"Flow complete. Status: {status}")
 
     def build_xgboost_model(self, n_estimators=100, max_depth=6, learning_rate=0.1, subsample=1.0):
+        """Pipeline factory for XGBoost regressor."""
         return Pipeline([
             ("imp", SimpleImputer(strategy="median")),
             ("xgb", xgb.XGBRegressor(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                subsample=subsample,  # <--- Added this line
-                random_state=42,
-                objective='reg:squarederror'
+                n_estimators=n_estimators, max_depth=max_depth,
+                learning_rate=learning_rate, subsample=subsample,
+                random_state=42, objective='reg:squarederror'
             ))
         ])
+
 if __name__ == "__main__":
     TaxiMonitoringFlow()
-
-       
-
-    
-
