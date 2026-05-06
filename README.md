@@ -77,17 +77,20 @@ mlflow ui --backend-store-uri file://$PWD/mlruns --port 5000
 ### 2. Run the Pipeline
 All commands must be executed from the root directory. Note the development/ prefix for the scripts and the root-relative paths for the data:
 ### Example: Training the August Champion
-
+```
 python development/03_xgboost_optimized_champion.py run \
   --model-name reviewer_test_model \
   --reference-path TLC_data/green_tripdata_2020-01.parquet \
   --batch-path TLC_data/green_tripdata_2020-08.parquet
+```
 
 ### Running the Monitoring Flow
+```
 
 python development/04_taxi_flow_monitoring.py run \
   --reference-path TLC_data/green_tripdata_2020-01.parquet \
   --batch-path TLC_data/green_tripdata_2020-08.parquet
+  ```
 
-  ---
+  
 

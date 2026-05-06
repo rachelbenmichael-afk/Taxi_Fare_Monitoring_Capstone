@@ -97,13 +97,6 @@ class TaxiMonitoringFlow(FlowSpec):
         init_mlflow(self.model_name)
         
         with mlflow.start_run(run_name="Data_Integrity"):
-            # Add a tag to show the gate was active
-            mlflow.set_tag("gate_type", "Data Integrity")
-            
-            # Check if the dictionary 'self.chk.tables' is not empty
-            gate_status = "Passed" if bool(self.chk.tables) else "Warning"
-            mlflow.set_tag("status", gate_status)
-            
             os.makedirs("checks", exist_ok=True)
             for name, tbl in self.chk.tables.items():
                 temp_path = f"checks/{name}.csv"
@@ -225,16 +218,8 @@ class TaxiMonitoringFlow(FlowSpec):
             if self.rmse < self.champion_rmse * (1 - improvement_threshold):
                 result = mlflow.register_model(f"runs:/{run.info.run_id}/model", self.model_name)
                 client.set_registered_model_alias(self.model_name, "champion", result.version)
-                
-                # --- DYNAMIC LOGGING ---
-                # This automatically gets the filename (e.g., 'green_tripdata_2020-08.parquet')
-                batch_filename = os.path.basename(self.batch_path)
-                
-                mlflow.set_tag("deployment_decision", "Promoted to Champion")
-                mlflow.set_tag("reason", f"Batch Update: {batch_filename}")
-                mlflow.log_param("gate_status", "Passed: RMSE improved")
-                
                 print(f"Version {result.version} promoted to @champion.")
+
         self.next(self.end)
 
     @step

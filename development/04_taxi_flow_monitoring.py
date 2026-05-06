@@ -87,7 +87,13 @@ class TaxiMonitoringFlow(FlowSpec):
         self.batch['prediction'] = model.predict(self.batch[features])
 
         # Execute detailed NannyML analysis
+        init_mlflow(self.model_name) # Ensure it uses the correct experiment
+        
         with mlflow.start_run(run_name="Monitoring_Deep_Dive"):
+            # Adding tags
+            mlflow.set_tag("type", "monitoring_output")
+            mlflow.set_tag("batch", os.path.basename(self.batch_path)) # Dynamic file name
+            
             os.makedirs("monitoring_plots", exist_ok=True)
             
             # --- UNIVARIATE DRIFT ANALYSIS ---
