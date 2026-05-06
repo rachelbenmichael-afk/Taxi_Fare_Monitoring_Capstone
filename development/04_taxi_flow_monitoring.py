@@ -52,6 +52,9 @@ class TaxiMonitoringFlow(FlowSpec):
         self.ref = process_features(self.ref)
         self.batch = process_features(self.batch)
         self.next(self.run_monitoring)
+        # --- TEMPORARY CRASH FOR DEMO ---
+        # This is aligned with self.next
+        #raise Exception("Simulated Pipeline Failure for Demonstration")
     
     @step
     def run_monitoring(self):
