@@ -37,7 +37,7 @@ Automated Tuning (Optuna): Instead of manual tuning, Optuna was used to systemat
 
 The Champion Gate: In 03_xgboost_optimized_champion.py, the system compares the new candidate's RMSE against the current registered @champion. A new version is only registered if it proves superior.
 
-## 4. Production Monitoring (Evidently AI)
+## 4. Production Monitoring (NannyML)
 The monitoring flow (04_taxi_flow_monitoring.py) performs two key analyses using the August data batch:
 
 Data Drift: Compares feature distributions between the January reference and August batch.
